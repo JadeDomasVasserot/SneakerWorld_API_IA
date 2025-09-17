@@ -20,7 +20,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        run: docker build -f ./Dockerfile -t ${{ secrets.DOCKERHUB_USERNAME }}/sneaker_world:latest .
+        run: docker build  -t ${{ secrets.DOCKERHUB_USERNAME }}/sneaker_world:latest .
 
       - name: Push Docker image
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/sneaker_world:latest
