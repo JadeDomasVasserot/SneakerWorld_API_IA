@@ -1,46 +1,43 @@
-import os
-import pandas as pd
-import numpy as np
-import torch
-import time
+# IA-API.py
+import os, json, time, base64
 from io import BytesIO
-from PIL import Image
-import base64
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List
-import pymysql
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import normalize
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    StoppingCriteria,
-    StoppingCriteriaList
-)
-from diffusers import DiffusionPipeline
-from urllib.parse import quote_plus
-import mlflow
-import mlflow.pyfunc
-import joblib
-mlflow.set_tracking_uri("http://127.0.0.1:8080")
+from typing import List, Optional
 
-# === ⚙️ Configuration environnement ===
-os.environ["OMP_NUM_THREADS"] = "4"
-torch.set_num_threads(4)
+import numpy as np
+import pandas as pd
+import joblib
+import torch
+
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+from sklearn.preprocessing import normalize
+from sklearn.neighbors import NearestNeighbors
+
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
+from diffusers import DiffusionPipeline
+
+# -----------------------------
+# Config générale
+# -----------------------------
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "4")))
+ART = os.getenv("ART_DIR", "ml_artifacts")
 
 # === 📦 Configuration Base de Données ===
 DB_USER = "sneaker"
-DB_PASSWORD = '$ne@kerW0rld'
-DB_HOST= "127.0.0.1"
-DB_PORT = 3306
-#DB_HOST = "bdd_pfe_sneakerworld.serverjadedomasvasserot.com"
-#DB_PORT = "39168"
+DB_PASSWORD = quote_plus('$ne@kerW0rld')
+DB_HOST = "bdd_pfe_sneakerworld.serverjadedomasvasserot.com"
+DB_PORT = "39168"
 DB_NAME = "sneakerworld"
+
+engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
 # === 🚀 Chargement modèles ML ===
 # Recommandation embeddings
-baskets = pd.read_csv("sneakers.csv")
+CATALOG_PATH = os.getenv("CATALOG_PATH", "sneakers.csv")
+baskets = pd.read_csv(CATALOG_PATH)
 basket_embeddings = np.load("sneaker_embeddings.npy")
 baskets['brand'] = baskets['text'].str.split().str[0]
 
@@ -65,30 +62,10 @@ class RecommendationRequest(BaseModel):
     user_id: int
     top_k: int = 3
 
-
-
-def load_recommendation_model():
-    experiment = mlflow.get_experiment_by_name("SneakerWorld")
-    runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id], filter_string="tags.mlflow.runName = 'recommendation_model'", order_by=["start_time desc"])
-    run_id = runs.iloc[0].run_id  # dernier run
-    local_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="models/recommendation")
-    
-    model = joblib.load(os.path.join(local_path, "recommend_model.pkl"))
-    basket_embeddings = np.load(os.path.join(local_path, "basket_embeddings.npy"))
-    baskets = pd.read_csv(os.path.join(local_path, "baskets.csv"))
-    
-    return model, basket_embeddings, baskets
-
-recommend_model, basket_embeddings, baskets = load_recommendation_model()
 # === 🧩 Fonctions utilitaires ===
 def get_user_preferences(user_id: int) -> List[str]:
-    conn = pymysql.connect(
-        host=DB_HOST,
-        user= DB_USER,
-        password=DB_PASSWORD,
-        db= DB_NAME
-    )
-    interaction_query = """
+    # Requête interactions
+    interaction_query = f"""
         SELECT
             a.action_user_name AS action,
             s.sneaker_brand,
@@ -103,12 +80,12 @@ def get_user_preferences(user_id: int) -> List[str]:
         FROM interaction i
         JOIN sneaker s ON i.interaction_sneaker_id = s.sneaker_model_numero
         JOIN action_user a ON i.interaction_action_id = a.action_user_id
-        WHERE i.interaction_user_id = %s
+        WHERE i.interaction_user_id = {user_id}
         ORDER BY RAND()
         LIMIT 3000;
     """
-    interactions_df = pd.read_sql(interaction_query, conn, params=[user_id])
-    conn.close()
+    interactions_df = pd.read_sql(interaction_query, engine)
+
     def format_row_with_score(row):
         action_scores = {
             "superlike": 2,
@@ -132,61 +109,27 @@ def get_user_preferences(user_id: int) -> List[str]:
 
 
     prefs = [format_row_with_score(row) for _, row in interactions_df.iterrows()]
-    conn = pymysql.connect(
-        host=DB_HOST,
-        user= DB_USER,
-        password=DB_PASSWORD,
-        db= DB_NAME
-    )
+
     # Requête profil user
-    user_query = """
-    SELECT user_brand, user_category, user_color, user_genre
-    FROM user
-    WHERE user_id = %s;
+    user_query = f"""
+        SELECT user_brand, user_category, user_color, user_genre
+        FROM user
+        WHERE user_id = {user_id};
     """
-    user_df = pd.read_sql(user_query, conn, params=[user_id])
-    conn.close()
-    print(user_df)
+    user_df = pd.read_sql(user_query, engine)
     profile = user_df.iloc[0] if not user_df.empty else None
 
     if profile is not None:
-        if "user_brand" in profile and pd.notna(profile["user_brand"]):
-            prefs.append(f"✅ préfère la marque {profile['user_brand']}")
-        if "user_category" in profile and pd.notna(profile["user_category"]):
-            prefs.append(f"✅ aime les baskets pour {profile['user_category']}")
-        if "user_color" in profile and pd.notna(profile["user_color"]):
-            prefs.append(f"✅ préfère les couleurs {profile['user_color']}")
-        if "user_genre" in profile and pd.notna(profile["user_genre"]):
-            prefs.append(f"✅ genre ciblé : {profile['user_genre']}")
+        if profile.user_brand:
+            prefs.append(f"✅ préfère la marque {profile.user_brand}")
+        if profile.user_category:
+            prefs.append(f"✅ aime les baskets pour {profile.user_category}")
+        if profile.user_color:
+            prefs.append(f"✅ préfère les couleurs {profile.user_color}")
+        if profile.user_genre:
+            prefs.append(f"✅ genre ciblé : {profile.user_genre}")
 
     return prefs[:100]
-
-
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from diffusers import DiffusionPipeline
-import torch
-
-def load_generation_model():
-    experiment = mlflow.get_experiment_by_name("SneakerWorld")
-    runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id], filter_string="tags.mlflow.runName = 'generation_model'", order_by=["start_time desc"])
-    run_id = runs.iloc[0].run_id
-    local_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="models/generation")
-
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(local_path, "mistral"))
-    model = AutoModelForCausalLM.from_pretrained(
-        os.path.join(local_path, "mistral"),
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto"
-    )
-    pipe = DiffusionPipeline.from_pretrained(os.path.join(local_path, "diffusion"))
-    pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
-    
-    return tokenizer, model, pipe
-
-tokenizer, model, pipe = load_generation_model()
-
-
 
 def build_prompt_generate_image(user_id: int) -> str:
     prefs = get_user_preferences(user_id)
@@ -227,8 +170,8 @@ def recommend_sneakers(request: RecommendationRequest):
     likes = [p for p in user_prefs if p.startswith("✅")]
     dislikes = [p for p in user_prefs if p.startswith("❌")]
 
-    like_vecs = recommend_model.encode(likes, batch_size=8, convert_to_numpy=True) if likes else np.zeros((1, recommend_model.get_sentence_embedding_dimension()))
-    dislike_vecs = recommend_model.encode(dislikes, batch_size=8, convert_to_numpy=True) if dislikes else np.zeros((1, recommend_model.get_sentence_embedding_dimension()))
+    like_vecs = model_recommend.encode(likes, batch_size=8, convert_to_numpy=True) if likes else np.zeros((1, model_recommend.get_sentence_embedding_dimension()))
+    dislike_vecs = model_recommend.encode(dislikes, batch_size=8, convert_to_numpy=True) if dislikes else np.zeros((1, model_recommend.get_sentence_embedding_dimension()))
 
     user_vector = np.mean(like_vecs, axis=0) - np.mean(dislike_vecs, axis=0)
     user_vector = normalize(user_vector.reshape(1, -1))
@@ -252,7 +195,8 @@ def generate_prompt_image(request: RecommendationRequest):
         temperature=0.7,
         top_p=0.9,
         do_sample=True,
-        pad_token_id=tokenizer.eos_token_id
+        pad_token_id=tokenizer.eos_token_id,
+        stopping_criteria=StoppingCriteriaList([PrintAndStopCriteria(500)])
     )
     full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
     generated_prompt = full_text.replace(prompt, "").strip()
