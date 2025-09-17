@@ -1,9 +1,25 @@
-torch>=2.0.0
-transformers>=4.30.0
-scikit-learn>=1.2.0
-pandas>=1.5.0
-numpy>=1.23.0
-matplotlib>=3.7.0
-jupyter
-sentencepiece
-accelerate
+# Web & API
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+pydantic==1.10.14   # ⚠️ garde Pydantic v1 pour compatibilité FastAPI
+
+# Data
+pandas==2.2.1
+numpy==1.26.4
+matplotlib==3.8.4
+scikit-learn==1.4.2
+pillow==10.2.0
+python-dotenv==1.0.1
+urllib3==2.2.1
+
+# NLP & embeddings
+torch==2.2.2        # ou torch==2.2.2+cu121 si CUDA dispo
+transformers==4.40.0
+diffusers==0.27.2
+accelerate==0.28.0
+huggingface_hub==0.22.2
+sentence-transformers==2.6.1
+
+# Database
+sqlalchemy==1.4.46   # ✅ version stable avec support .cursor() via pandas
+pymysql==1.1.0
